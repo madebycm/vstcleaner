@@ -1,0 +1,5 @@
+# Deprecated: VST3 is always preferred and never removed.
+# This file is currently ignored.
+
+Pro-Q 2
+Pro-Q 3
