@@ -362,6 +362,10 @@ WAVES_AU_DUPES: list[tuple[Path, str]] = [
 WAVES_PLUGINS_SYSTEM = Path("/Applications/Waves/Plug-Ins V16")
 WAVES_PLUGINS_USER = Path.home() / "Library/Preferences/Waves Preferences/Waves Plugins V16"
 
+# WaveShell scan cache — must be deleted after modifying ProcessXML so the
+# WaveShell rebuilds its sub-plugin list on next DAW launch.
+WAVES_SCAN_CACHE_DIR = Path.home() / "Library/Caches/Waves"
+
 # Waves plugins not relevant for music production — surround, broadcast,
 # live sound, networking, test utilities.  Moved to tmp on each run.
 # See specifics/waves.txt for rationale.
@@ -909,7 +913,26 @@ def strip_waves_mono() -> tuple[int, int]:
             if bundle_modified:
                 plugins_modified += 1
 
+    # Clear the WaveShell scan cache so it rebuilds on next DAW launch
+    if total_removed > 0:
+        _clear_waves_scan_cache()
+
     return plugins_modified, total_removed
+
+
+def _clear_waves_scan_cache() -> None:
+    """Delete Waves WaveShell scan caches so sub-plugin lists are rebuilt."""
+    if not WAVES_SCAN_CACHE_DIR.is_dir():
+        return
+    for cache_file in WAVES_SCAN_CACHE_DIR.rglob("SCAN_CACHE*"):
+        try:
+            cache_file.unlink()
+        except OSError:
+            pass
+    # Also clear cached WaveShell WPAPI bundles (old versions)
+    wpapi_dir = WAVES_SCAN_CACHE_DIR / "Library/Audio/Plug-Ins/WPAPI"
+    if wpapi_dir.is_dir():
+        shutil.rmtree(wpapi_dir, ignore_errors=True)
 
 
 def remove_waves_non_production(
