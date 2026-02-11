@@ -1,6 +1,6 @@
 # vstcleaner
 
-Removes duplicate macOS audio plugin formats when a VST3 version exists. Moves duplicates to `/tmp` instead of deleting them, so nothing is lost.
+Removes duplicate macOS audio plugin formats when a VST3 version exists, and strips redundant Waves mono sub-components. Moves duplicates to `/tmp` instead of deleting them, so nothing is lost.
 
 ## What It Does
 
@@ -17,10 +17,17 @@ vstcleaner scans your system and user plugin directories, finds plugins that hav
 | AAX (`.aaxplugin`) | `/Library/Application Support/Avid/Audio/Plug-Ins` | `~/Library/Application Support/Avid/Audio/Plug-Ins` |
 | CLAP (`.clap`) | `/Library/Audio/Plug-Ins/CLAP` | `~/Library/Audio/Plug-Ins/CLAP` |
 
+### Waves-specific handling
+
+- **Old WaveShell versions** — Removes superseded WaveShell containers (e.g. 16.6 when 16.7 exists)
+- **WaveShell AU format dupes** — The name-based matcher can't catch these (`WaveShell1-AU` vs `WaveShell1-VST3`), so they're hardcoded
+- **Mono sub-component stripping** — Waves plugins register both mono `(m)` and stereo `(s)` variants inside the WaveShell. When a stereo version exists, the mono is redundant clutter. vstcleaner edits the ProcessXML files in each Waves plugin bundle to remove the mono definitions (177 mono sub-components across 134 plugins). Originals are backed up and fully restorable.
+
 ### Always kept
 
 - **VST3** — never removed, always the preferred format
 - Any plugin that does **not** have a VST3 counterpart
+- Waves plugins that are mono-only (no stereo version available)
 
 ## Requirements
 
@@ -30,11 +37,17 @@ vstcleaner scans your system and user plugin directories, finds plugins that hav
 ## Usage
 
 ```bash
-# Remove all duplicate formats (VST2, AU, AAX, CLAP)
+# Full clean — remove format dupes + strip Waves mono sub-components
 python3 vst_cleaner.py
 
-# Keep AU/Components, only remove VST2, AAX, and CLAP duplicates
+# Keep AU/Components
 python3 vst_cleaner.py skipau
+
+# Skip Waves mono stripping
+python3 vst_cleaner.py skipwavesmono
+
+# Restore original Waves ProcessXML files from backups
+python3 vst_cleaner.py restoremono
 ```
 
 Sudo access is requested automatically when needed (system-level plugins require root). The password is cached in an encrypted `.cache` file tied to your machine for convenience on repeat runs.
@@ -45,11 +58,15 @@ Sudo access is requested automatically when needed (system-level plugins require
 2. Scans VST2, AU, AAX, and CLAP directories (recursively, including subdirectories)
 3. Matches plugins by base name (case-insensitive) against the VST3 list
 4. Moves matched duplicates to `/tmp/removed_plugins/<format>/`
-5. Prints a summary of what was moved and how much space was recovered
+5. Removes old/duplicate Waves WaveShell containers
+6. Strips mono `<SubComponent>` entries from Waves ProcessXML files when a stereo version exists (backs up originals to `waves_mono_backup/`)
+7. Prints a summary of what was moved/stripped and how much space was recovered
 
 ## Recovery
 
-Moved plugins land in `/tmp/removed_plugins/` (organized by format). To restore a plugin, move it back to its original directory. Note that `/tmp` is cleared on reboot, so recover before restarting if needed.
+**Format duplicates** land in `/tmp/removed_plugins/` (organized by format). Move them back to restore. Note that `/tmp` is cleared on reboot.
+
+**Waves mono stripping** is backed up to `waves_mono_backup/` alongside the script. Run `python3 vst_cleaner.py restoremono` to restore all original ProcessXML files. Re-run `wavesmono` stripping after Waves updates (the updater overwrites the modified XMLs).
 
 ## License
 

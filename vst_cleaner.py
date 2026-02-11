@@ -6,11 +6,17 @@ Defaults to /tmp/removed_plugins and falls back to /tmp/removed_plugins_<user>.
 Removes (match by bundle base name, case-insensitive):
   - Non-VST3 bundles with a matching VST3 name (VST2, AAX, CLAP)
   - AU (.component) by default (skip with 'skipau' argument)
+  - Old Waves WaveShell versions and AU format dupes
 
 Keeps:
   - Any format that doesn't have a VST3 duplicate
   - VST3 bundles (always preferred)
   - AU plugins (only when 'skipau' is specified)
+
+Options:
+  skipau         — Keep AU/Components (don't remove them)
+  skipwavesmono  — Skip stripping Waves mono sub-components
+  restoremono    — Restore original Waves ProcessXML from backups (then exit)
 """
 
 import base64
@@ -20,6 +26,7 @@ import hmac
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import subprocess
@@ -325,6 +332,273 @@ USER_VST3_PATH = Path.home() / "Library/Audio/Plug-Ins/VST3"
 
 DEFAULT_TMP_PATH = Path("/tmp/removed_plugins")
 
+# ---------------------------------------------------------------------------
+# Waves-specific duplicate handling
+# ---------------------------------------------------------------------------
+# WaveShell AU and VST3 use different naming conventions:
+#   AU:   "WaveShell1-AU 16.7.component"
+#   VST3: "WaveShell1-VST3 16.7.vst3"
+# The standard base-name matching can't catch these, so we hardcode them.
+#
+# NOTE: Waves mono/stereo sub-plugin variants (m), (s), (m->s) are all
+# registered inside the same WaveShell container and CANNOT be removed by
+# deleting files. Use your DAW's plugin manager to hide unwanted variants.
+# The full list of 229 mono-redundant Waves plugins is documented below.
+
+# Old WaveShell versions superseded by newer installs — always safe to remove.
+WAVES_OBSOLETE: list[tuple[Path, str]] = [
+    (Path("/Library/Audio/Plug-Ins/VST3"), "WaveShell1-VST3 16.6.vst3"),
+    (Path("/Library/Audio/Plug-Ins/Components"), "WaveShell1-AU 16.6.component"),
+]
+
+# WaveShell AU format duplicates (VST3 version already exists).
+# Only removed when AU removal is enabled (i.e. 'skipau' not passed).
+WAVES_AU_DUPES: list[tuple[Path, str]] = [
+    (Path("/Library/Audio/Plug-Ins/Components"), "WaveShell1-AU 16.7.component"),
+]
+
+# Waves plugin directories (plugin bundles with ProcessXML sub-component defs)
+WAVES_PLUGINS_SYSTEM = Path("/Applications/Waves/Plug-Ins V16")
+WAVES_PLUGINS_USER = Path.home() / "Library/Preferences/Waves Preferences/Waves Plugins V16"
+WAVES_MONO_BACKUP_DIR = Path(__file__).resolve().parent / "waves_mono_backup"
+
+# Waves plugins that have BOTH mono (m) and stereo (s) variants inside the
+# WaveShell.  The mono versions are redundant when stereo exists.
+# The 'wavesmono' mode strips these from the ProcessXML files so the WaveShell
+# no longer registers them.  Use 'restoremono' to undo.
+WAVES_MONO_REDUNDANT: list[str] = [
+    "API-2500",
+    "API-550A",
+    "API-550B",
+    "API-560",
+    "Abbey Road Chambers",
+    "Abbey Road EMI TG12345 Ch",
+    "Abbey Road J37 Tape",
+    "Abbey Road Plates",
+    "Abbey Road REDD.17",
+    "Abbey Road REDD.37.51",
+    "Abbey Road RS124",
+    "Abbey Road RS56 Passive EQ",
+    "Abbey Road Reel ADT",
+    "Abbey Road Reel ADT Live",
+    "Abbey Road Saturator",
+    "Abbey Road TG Mastering",
+    "Abbey Road TG Mastering Live",
+    "Abbey Road TG Meter Bridge",
+    "Abbey Road The King's Microphones",
+    "Abbey Road Vinyl",
+    "Abbey Road Vinyl Light",
+    "Aphex Vintage Exciter",
+    "AudioTrack",
+    "Bass Rider",
+    "Bass Rider Live",
+    "Berzerk Distortion",
+    "Butch Vig Vocals",
+    "C1 comp",
+    "C1 comp-gate",
+    "C1 comp-sc",
+    "C1 gate",
+    "C4",
+    "C6",
+    "C6-SideChain",
+    "CLA MixDown",
+    "CLA MixHub",
+    "CLA MixHub Lite",
+    "CLA-2A",
+    "CLA-3A",
+    "CLA-76",
+    "Clarity Vx",
+    "Clarity Vx - DeReverb",
+    "Clarity Vx - DeReverb Pro",
+    "Clarity Vx Pro",
+    "Curves AQ",
+    "Curves AQ Live",
+    "Curves Equator",
+    "Curves Equator Live",
+    "Curves Resolve",
+    "Curves Resolve Live",
+    "DPR-402",
+    "DeEsser",
+    "Dorrough",
+    "Doubler2",
+    "Doubler4",
+    "EKramer BA",
+    "EKramer DR",
+    "EMO-D5",
+    "EMO-F2",
+    "EMO-Generator",
+    "EMO-Q4",
+    "F6",
+    "F6-RTA",
+    "GEQ Classic",
+    "GEQ Modern",
+    "GTR Amp",
+    "GTR Stomp 2",
+    "GTR Stomp 4",
+    "GTR Stomp 6",
+    "GW MixCentric",
+    "GW PianoCentric",
+    "GW ToneCentric",
+    "GW VoiceCentric",
+    "H-Comp",
+    "H-Delay",
+    "H-EQ",
+    "H-EQ-Light",
+    "H-Reverb",
+    "H-Reverb long",
+    "IDX Intelligent Dynamics",
+    "IDX LIVE Intelligent Dynamics",
+    "IMPusher",
+    "IR-L",
+    "IR1",
+    "IRLive",
+    "InPhase",
+    "InPhase LT",
+    "InPhase LT Live",
+    "InPhase Live",
+    "InTrigger",
+    "InTrigger Live",
+    "JJP-Bass",
+    "JJP-Drums",
+    "Kaleidoscopes",
+    "Key Detector",
+    "Kramer HLS",
+    "Kramer PIE",
+    "Kramer Tape",
+    "L1 limiter",
+    "L2",
+    "L2-SC",
+    "L3 MultiMaximizer",
+    "L3 UltraMaximizer",
+    "L3-LL Multi",
+    "L3-LL Ultra",
+    "L316",
+    "L4 Ultramaximizer",
+    "LinEQ Broadband",
+    "LinEQ Lowband",
+    "LinMB",
+    "LoAir",
+    "Lofi Space",
+    "MDMX Fuzz",
+    "MDMX OverDrive",
+    "MDMX Screamer",
+    "MV2",
+    "Magma BB Tubes",
+    "Magma Channel Strip",
+    "Magma Lil Tube",
+    "Magma Springs",
+    "MannyM Distortion",
+    "MannyM EQ",
+    "MannyM Reverb",
+    "MannyM Tone Shaper",
+    "MannyM TripleD",
+    "Maserati B72",
+    "Maserati DRM",
+    "Maserati GRP",
+    "MaxxBass",
+    "MaxxVolume",
+    "MetaFilter",
+    "MetaFlanger",
+    "MondoMod",
+    "Morphoder",
+    "MultiMod Rack",
+    "NLS Buss",
+    "NLS Channel",
+    "NS1",
+    "OneKnob Brighter",
+    "OneKnob Driver",
+    "OneKnob Filter",
+    "OneKnob Louder",
+    "OneKnob Phatter",
+    "OneKnob Pressure",
+    "OneKnob Pumper",
+    "OneKnob Wetter",
+    "PAZ- Frequency",
+    "PAZ- Meters",
+    "PRS Archon",
+    "PRS Dallas",
+    "PRS V9",
+    "PSE",
+    "PlaylistRider",
+    "PuigTec EQP1A",
+    "PuigTec MEQ5",
+    "Q-Clone",
+    "Q1",
+    "Q10",
+    "Q2",
+    "Q3",
+    "Q4",
+    "Q6",
+    "Q8",
+    "RBass",
+    "RChannel",
+    "RCompressor",
+    "RDeEsser",
+    "REQ 2",
+    "REQ 4",
+    "REQ 6",
+    "RVox",
+    "Renaissance Axx",
+    "Retro Fi",
+    "SSL EV2 Channel",
+    "SSLChannel",
+    "SSLComp",
+    "SSLEQ",
+    "SSLGChannel",
+    "Saphira",
+    "Scheps 73",
+    "Scheps Omni Channel 2",
+    "Scheps Parallel Particles",
+    "Sibilance",
+    "Sibilance-Live",
+    "Silk Vocal",
+    "Silk Vocal Live",
+    "Smack Attack",
+    "SoundShifter Pitch",
+    "StudioVerse Audio Effects",
+    "Sub Align",
+    "Submarine",
+    "SuperTap 2-Taps",
+    "SuperTap 6-Taps",
+    "TRACT",
+    "TRACT LinPhase",
+    "Torque",
+    "Torque-Live",
+    "TransX Multi",
+    "TransX Wide",
+    "TrueVerb",
+    "UltraPitch 3 Voices",
+    "UltraPitch 6 Voices",
+    "UltraPitch Shift",
+    "VComp",
+    "VEQ3",
+    "VEQ4",
+    "VU Meter",
+    "Vitamin",
+    "Vocal Bender",
+    "Vocal Rider",
+    "Vocal Rider Live",
+    "Voltage Amps Bass",
+    "Voltage Amps Guitar",
+    "W43",
+    "WLM Meter",
+    "WLM Plus",
+    "WNS",
+    "Waves Stream Receive",
+    "Waves Stream Send",
+    "Waves Tune",
+    "Waves Tune LT",
+    "Waves Tune Real-Time",
+    "X-Click",
+    "X-Crackle",
+    "X-FDBK",
+    "X-Hum",
+    "X-Noise",
+    "Z-Noise",
+    "dbx-160",
+]
+
+
 def list_bundles(folder: Path, suffix: str) -> list[Path]:
     """List bundle paths in folder matching suffix (case-insensitive, recursive)."""
     if not folder.exists() or not folder.is_dir():
@@ -445,6 +719,30 @@ def ensure_dir(dest_dir: Path) -> bool:
         ok, _ = run_with_sudo_retry(["mkdir", "-p", str(dest_dir)])
         return ok
 
+def remove_hardcoded_files(
+    removals: list[tuple[Path, str]],
+    dest_dir: Path,
+    failures: list[str] | None = None,
+) -> tuple[list[str], int]:
+    """Move hardcoded plugin files (by exact directory + filename)."""
+    moved: list[str] = []
+    bytes_moved = 0
+    for folder, filename in removals:
+        path = folder / filename
+        if not path.exists():
+            continue
+        if not ensure_dir(dest_dir):
+            continue
+        size = get_size(path)
+        ok, error = move_path(path, dest_dir)
+        if ok:
+            moved.append(filename)
+            bytes_moved += size
+        elif failures is not None:
+            failures.append(f"{path} -> {error}")
+    return moved, bytes_moved
+
+
 def remove_duplicates_by_vst3(
     folder: Path,
     dest_dir: Path,
@@ -476,9 +774,190 @@ def remove_duplicates_by_vst3(
     return moved, bytes_moved
 
 
+# ---------------------------------------------------------------------------
+# Waves mono sub-component stripping
+# ---------------------------------------------------------------------------
+
+def _find_waves_plugin_dirs() -> list[Path]:
+    """Return existing Waves plugin bundle directories."""
+    dirs = []
+    for d in [WAVES_PLUGINS_SYSTEM, WAVES_PLUGINS_USER]:
+        if d.is_dir():
+            dirs.append(d)
+    return dirs
+
+
+def _parse_subcomponents(xml_text: str) -> list[dict]:
+    """Parse SubComponent blocks from a ProcessXML file."""
+    results = []
+    for m in re.finditer(r'<SubComponent>.*?</SubComponent>', xml_text, re.DOTALL):
+        block = m.group()
+        name_m = re.search(r'Name="([^"]+)"', block)
+        name = name_m.group(1) if name_m else None
+        if not name:
+            continue
+        is_mono = ('default_mono' in block
+                   and 'default_mono_to_stereo' not in block
+                   and 'default_mono_side_chain' not in block)
+        is_stereo = 'default_stereo' in block
+        results.append({
+            'name': name,
+            'mono': is_mono,
+            'stereo': is_stereo,
+            'span': m.span(),
+            'text': block,
+        })
+    return results
+
+
+def _strip_mono_from_xml(xml_text: str) -> tuple[str, int]:
+    """Remove mono SubComponent blocks when a stereo block exists for same name.
+
+    Returns (modified_xml, count_removed).
+    """
+    subs = _parse_subcomponents(xml_text)
+    stereo_names = {s['name'] for s in subs if s['stereo']}
+    # Find mono entries to remove (in reverse order to preserve offsets)
+    to_remove = [s for s in subs if s['mono'] and s['name'] in stereo_names]
+    if not to_remove:
+        return xml_text, 0
+
+    to_remove.sort(key=lambda s: s['span'][0], reverse=True)
+    result = xml_text
+    for entry in to_remove:
+        start, end = entry['span']
+        # Also remove surrounding whitespace/newlines
+        while start > 0 and result[start - 1] in ' \t':
+            start -= 1
+        if end < len(result) and result[end] == '\n':
+            end += 1
+        result = result[:start] + result[end:]
+
+    return result, len(to_remove)
+
+
+def strip_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
+    """Strip mono sub-components from all Waves ProcessXML files.
+
+    Backs up originals before modifying.
+    Returns (plugins_modified, subcomponents_removed).
+    """
+    if backup_dir is None:
+        backup_dir = WAVES_MONO_BACKUP_DIR
+    plugins_modified = 0
+    total_removed = 0
+
+    for waves_dir in _find_waves_plugin_dirs():
+        for bundle in sorted(waves_dir.iterdir()):
+            if not bundle.name.endswith('.bundle'):
+                continue
+            pxml_dir = bundle / "Contents/Resources/ProcessXML"
+            if not pxml_dir.is_dir():
+                continue
+
+            bundle_modified = False
+            for xml_file in sorted(pxml_dir.glob("*.xml")):
+                try:
+                    original = xml_file.read_text(encoding='utf-8')
+                except OSError:
+                    continue
+
+                modified, count = _strip_mono_from_xml(original)
+                if count == 0:
+                    continue
+
+                # Back up original (preserve directory structure)
+                rel = xml_file.relative_to(waves_dir)
+                backup_path = backup_dir / waves_dir.name / rel
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                if not backup_path.exists():
+                    backup_path.write_text(original, encoding='utf-8')
+
+                # Write modified XML
+                try:
+                    xml_file.write_text(modified, encoding='utf-8')
+                except PermissionError:
+                    ok, err = run_with_sudo_retry(
+                        ["cp", "/dev/stdin", str(xml_file)],
+                        timeout=10,
+                    )
+                    if not ok:
+                        # Write to temp file and sudo mv
+                        tmp = Path(f"/tmp/_waves_mono_{os.getpid()}.xml")
+                        tmp.write_text(modified, encoding='utf-8')
+                        run_with_sudo_retry(["cp", str(tmp), str(xml_file)])
+                        tmp.unlink(missing_ok=True)
+
+                total_removed += count
+                bundle_modified = True
+
+            if bundle_modified:
+                plugins_modified += 1
+
+    return plugins_modified, total_removed
+
+
+def restore_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
+    """Restore original Waves ProcessXML files from backups.
+
+    Returns (files_restored, errors).
+    """
+    if backup_dir is None:
+        backup_dir = WAVES_MONO_BACKUP_DIR
+    if not backup_dir.is_dir():
+        print("No backup directory found. Nothing to restore.")
+        return 0, 0
+
+    restored = 0
+    errors = 0
+
+    for waves_dir in _find_waves_plugin_dirs():
+        backup_subdir = backup_dir / waves_dir.name
+        if not backup_subdir.is_dir():
+            continue
+
+        for backup_file in backup_subdir.rglob("*.xml"):
+            rel = backup_file.relative_to(backup_subdir)
+            target = waves_dir / rel
+            try:
+                content = backup_file.read_text(encoding='utf-8')
+                try:
+                    target.write_text(content, encoding='utf-8')
+                except PermissionError:
+                    tmp = Path(f"/tmp/_waves_restore_{os.getpid()}.xml")
+                    tmp.write_text(content, encoding='utf-8')
+                    ok, _ = run_with_sudo_retry(["cp", str(tmp), str(target)])
+                    tmp.unlink(missing_ok=True)
+                    if not ok:
+                        raise PermissionError(f"sudo cp failed for {target}")
+                restored += 1
+            except OSError as exc:
+                print(f"  Failed to restore {target}: {exc}")
+                errors += 1
+
+    # Clean up backup dir after successful restore
+    if errors == 0 and restored > 0:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
+    return restored, errors
+
+
 def main():
     args = {arg.lower() for arg in sys.argv[1:]}
+
+    # Standalone restore mode — exits after restoring
+    if "restoremono" in args:
+        print("Restoring original Waves ProcessXML files from backups...")
+        restored, errors = restore_waves_mono()
+        if restored:
+            print(f"Restored {restored} file(s)." + (f" ({errors} error(s))" if errors else ""))
+            print("Re-scan plugins in your DAW to apply changes.")
+        elif errors:
+            print(f"Restoration failed with {errors} error(s).")
+        return
+
     remove_au = "skipau" not in args
+    strip_waves = "skipwavesmono" not in args
 
     tmp_base = resolve_tmp_base(DEFAULT_TMP_PATH)
     if tmp_base != DEFAULT_TMP_PATH:
@@ -558,6 +1037,29 @@ def main():
         failures,
     )
 
+    # Waves-specific: old WaveShell versions (always remove)
+    waves_old_moved, waves_old_bytes = remove_hardcoded_files(
+        WAVES_OBSOLETE,
+        tmp_base / "Waves_Obsolete",
+        failures,
+    )
+
+    # Waves-specific: WaveShell AU format dupes (only when AU removal enabled)
+    if remove_au:
+        waves_au_moved, waves_au_bytes = remove_hardcoded_files(
+            WAVES_AU_DUPES,
+            tmp_base / "Waves_AU_Dupes",
+            failures,
+        )
+    else:
+        waves_au_moved, waves_au_bytes = [], 0
+
+    # Waves mono sub-component stripping (runs by default)
+    waves_mono_removed = 0
+    waves_mono_plugins = 0
+    if strip_waves:
+        waves_mono_plugins, waves_mono_removed = strip_waves_mono()
+
     # Combine results
     results["VST2 dupes (System)"] = (sys_vst_moved, sys_vst_bytes)
     results["VST2 dupes (User)"] = (user_vst_moved, user_vst_bytes)
@@ -567,19 +1069,22 @@ def main():
     results["AAX dupes (User)"] = (user_aax_moved, user_aax_bytes)
     results["CLAP dupes (System)"] = (sys_clap_moved, sys_clap_bytes)
     results["CLAP dupes (User)"] = (user_clap_moved, user_clap_bytes)
+    results["Waves old versions"] = (waves_old_moved, waves_old_bytes)
+    results["Waves AU format dupes"] = (waves_au_moved, waves_au_bytes)
 
     total_bytes = sum(b for _, b in results.values())
     total_count = sum(len(m) for m, _ in results.values())
 
-    if total_count == 0:
+    if total_count == 0 and waves_mono_removed == 0:
         if failures:
             print(f"Found duplicates but failed to move {len(failures)} item(s).")
             for entry in failures:
                 print(f"  - {entry}")
         else:
-            print("Nothing to move. No duplicate formats found.")
+            print("Nothing to clean. No duplicate formats or Waves mono redundancies found.")
     else:
-        print(f"Moved {total_count} plugin(s) to {tmp_base} ({human_size(total_bytes)})\n")
+        if total_count:
+            print(f"Moved {total_count} plugin(s) to {tmp_base} ({human_size(total_bytes)})\n")
 
         for category, (moved, _) in results.items():
             if moved:
@@ -587,6 +1092,12 @@ def main():
                 for name in moved:
                     print(f"  - {name}")
                 print()
+
+        if waves_mono_removed:
+            print(f"Waves mono stripped ({waves_mono_removed}):")
+            print(f"  Removed {waves_mono_removed} mono sub-component(s) from {waves_mono_plugins} plugin(s)")
+            print(f"  Backups in {WAVES_MONO_BACKUP_DIR}")
+            print(f"  Run with 'restoremono' to undo\n")
 
         if failures:
             print(f"Failed to move {len(failures)} item(s):")
@@ -596,6 +1107,8 @@ def main():
 
     if not remove_au:
         print("Skipping AU/Components removal ('skipau' was specified).")
+    if not strip_waves:
+        print("Skipping Waves mono stripping ('skipwavesmono' was specified).")
 
 
 
