@@ -1,0 +1,98 @@
+Waves V16 — vstcleaner specifics
+==================================
+
+Waves plugins are loaded via the WaveShell container, not as individual
+AU/VST3 files.  This creates several issues the generic name-based
+duplicate matcher can't handle.  All Waves-specific logic is hardcoded
+in vst_cleaner.py and documented here.
+
+
+1. WaveShell format duplicates
+-------------------------------
+WaveShell AU and VST3 use different naming conventions:
+  AU:   WaveShell1-AU 16.7.component
+  VST3: WaveShell1-VST3 16.7.vst3
+
+The base-name matcher sees these as different plugins, so they're
+hardcoded in WAVES_AU_DUPES.  The AU is removed when AU removal is
+enabled (default behaviour).
+
+Old WaveShell versions (e.g. 16.6 when 16.7 is installed) are listed
+in WAVES_OBSOLETE and always removed.
+
+
+2. Non-production plugins (WAVES_NON_PRODUCTION)
+-------------------------------------------------
+These Waves bundles are not relevant for stereo music production and
+are moved to /tmp/removed_plugins/Waves_Non_Production/ on each run.
+
+Surround / Immersive / 360 (post-production, film, Atmos):
+  - B360              Ambisonics encoder for VR/360 video
+  - C360              Surround compressor (5.1/7.1)
+  - Dorrough Surr 5.0 Surround metering
+  - Dorrough Surr 5.1 Surround metering
+  - DTS Neural DownMix   Broadcast surround downmix
+  - DTS Neural Mono2Stereo  Broadcast upmix
+  - DTS Neural UpMix   Broadcast surround upmix
+  - IR-360            Surround convolution reverb
+  - Immersive Wrapper  Dolby Atmos channel wrapper
+  - L360              Surround limiter
+  - MV360             Surround multiband dynamics
+  - R360              Surround reverb
+  - S360              Surround panner/imager
+  - Spherix Imm. Comp  Atmos compressor
+  - Spherix Imm. Lim   Atmos limiter
+
+Live Sound / Installation:
+  - Dugan Speech       Auto mic mixing for conferences/broadcast
+  - TRACT              PA system tuning/alignment
+  - X-FDBK             Live feedback suppression
+  - Sub Align           Subwoofer time alignment for live rigs
+
+Broadcast:
+  - WLM                Broadcast loudness meter (WLM Plus is kept)
+
+Networking:
+  - Waves Stream       Audio routing between computers over network
+
+Test utility:
+  - SignalGenerator     Test tone generator
+
+
+3. Mono sub-component stripping (WAVES_MONO_REDUNDANT)
+-------------------------------------------------------
+Waves plugins register both mono (m) and stereo (s) sub-components
+inside the WaveShell via ProcessXML files in each plugin bundle:
+
+  /Applications/Waves/Plug-Ins V16/<plugin>.bundle/Contents/Resources/ProcessXML/
+
+Each SubComponent block references a ProcessCodeDescription like
+"default_mono" or "default_stereo".  When both exist for the same
+plugin name, the mono entry is stripped from the XML.
+
+229 plugins have redundant mono versions.  177 mono SubComponent
+entries are stripped across 134 plugin bundles.
+
+6 plugins are mono-only (no stereo available) and are kept:
+  - DeBreath
+  - GTR Amp 2Cab
+  - GTR Tuner
+  - LFE360
+  - PuigChild 660
+  - Q-Capture
+
+The mono stripping runs by default.  Use 'skipwavesmono' to skip.
+Waves updates overwrite the ProcessXML files, so re-run after updating.
+
+
+4. Extending to future Waves versions
+--------------------------------------
+When Waves releases a new major version (e.g. V17):
+
+  - Update WAVES_PLUGINS_SYSTEM / WAVES_PLUGINS_USER paths
+  - Update WAVES_OBSOLETE with old WaveShell version numbers
+  - Update WAVES_AU_DUPES with new WaveShell AU name
+  - Re-scan installed plugins to update WAVES_NON_PRODUCTION
+    and WAVES_MONO_REDUNDANT lists
+  - Run: auval -a | grep -i wav   (to see registered AU components)
+  - Or parse the WaveShell's Info.plist AudioComponents list

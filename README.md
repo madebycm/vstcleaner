@@ -1,6 +1,6 @@
 # vstcleaner
 
-Removes duplicate macOS audio plugin formats when a VST3 version exists, and strips redundant Waves mono sub-components. Moves duplicates to `/tmp` instead of deleting them, so nothing is lost.
+Removes duplicate macOS audio plugin formats when a VST3 version exists, strips redundant Waves mono sub-components, and removes non-production Waves plugins. Moves everything to `/tmp` instead of deleting, so nothing is lost.
 
 ## What It Does
 
@@ -21,7 +21,8 @@ vstcleaner scans your system and user plugin directories, finds plugins that hav
 
 - **Old WaveShell versions** — Removes superseded WaveShell containers (e.g. 16.6 when 16.7 exists)
 - **WaveShell AU format dupes** — The name-based matcher can't catch these (`WaveShell1-AU` vs `WaveShell1-VST3`), so they're hardcoded
-- **Mono sub-component stripping** — Waves plugins register both mono `(m)` and stereo `(s)` variants inside the WaveShell. When a stereo version exists, the mono is redundant clutter. vstcleaner edits the ProcessXML files in each Waves plugin bundle to remove the mono definitions (177 mono sub-components across 134 plugins). Originals are backed up and fully restorable.
+- **Non-production plugins** — Removes 22 Waves plugins not relevant for stereo music production (surround/immersive, live sound, broadcast, networking, test utilities). See `specifics/waves.txt` for the full list and rationale.
+- **Mono sub-component stripping** — Waves plugins register both mono `(m)` and stereo `(s)` variants inside the WaveShell. When a stereo version exists, the mono is redundant clutter. vstcleaner edits the ProcessXML files in each Waves plugin bundle to remove the mono definitions (177 mono entries across 134 plugins).
 
 ### Always kept
 
@@ -37,7 +38,7 @@ vstcleaner scans your system and user plugin directories, finds plugins that hav
 ## Usage
 
 ```bash
-# Full clean — remove format dupes + strip Waves mono sub-components
+# Full clean — remove format dupes, non-production Waves plugins, strip mono
 python3 vst_cleaner.py
 
 # Keep AU/Components
@@ -45,9 +46,6 @@ python3 vst_cleaner.py skipau
 
 # Skip Waves mono stripping
 python3 vst_cleaner.py skipwavesmono
-
-# Restore original Waves ProcessXML files from backups
-python3 vst_cleaner.py restoremono
 ```
 
 Sudo access is requested automatically when needed (system-level plugins require root). The password is cached in an encrypted `.cache` file tied to your machine for convenience on repeat runs.
@@ -59,14 +57,19 @@ Sudo access is requested automatically when needed (system-level plugins require
 3. Matches plugins by base name (case-insensitive) against the VST3 list
 4. Moves matched duplicates to `/tmp/removed_plugins/<format>/`
 5. Removes old/duplicate Waves WaveShell containers
-6. Strips mono `<SubComponent>` entries from Waves ProcessXML files when a stereo version exists (backs up originals to `waves_mono_backup/`)
-7. Prints a summary of what was moved/stripped and how much space was recovered
+6. Moves non-production Waves plugin bundles (surround, broadcast, live, etc.)
+7. Strips mono `<SubComponent>` entries from Waves ProcessXML when stereo exists
+8. Prints a summary of what was moved/stripped and how much space was recovered
 
 ## Recovery
 
-**Format duplicates** land in `/tmp/removed_plugins/` (organized by format). Move them back to restore. Note that `/tmp` is cleared on reboot.
+Moved plugins land in `/tmp/removed_plugins/` (organized by category). Move them back to restore. Note that `/tmp` is cleared on reboot.
 
-**Waves mono stripping** is backed up to `waves_mono_backup/` alongside the script. Run `python3 vst_cleaner.py restoremono` to restore all original ProcessXML files. Re-run `wavesmono` stripping after Waves updates (the updater overwrites the modified XMLs).
+Waves mono stripping modifies ProcessXML files in-place. Waves updates will restore the originals, so re-run the script after updating Waves.
+
+## Vendor-specific docs
+
+- [`specifics/waves.txt`](specifics/waves.txt) — Waves V16 handling details, non-production list, mono stripping internals
 
 ## License
 

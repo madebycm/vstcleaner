@@ -7,6 +7,8 @@ Removes (match by bundle base name, case-insensitive):
   - Non-VST3 bundles with a matching VST3 name (VST2, AAX, CLAP)
   - AU (.component) by default (skip with 'skipau' argument)
   - Old Waves WaveShell versions and AU format dupes
+  - Non-production Waves plugins (surround, broadcast, live sound, etc.)
+  - Redundant Waves mono sub-components (when stereo exists)
 
 Keeps:
   - Any format that doesn't have a VST3 duplicate
@@ -16,7 +18,6 @@ Keeps:
 Options:
   skipau         — Keep AU/Components (don't remove them)
   skipwavesmono  — Skip stripping Waves mono sub-components
-  restoremono    — Restore original Waves ProcessXML from backups (then exit)
 """
 
 import base64
@@ -360,12 +361,43 @@ WAVES_AU_DUPES: list[tuple[Path, str]] = [
 # Waves plugin directories (plugin bundles with ProcessXML sub-component defs)
 WAVES_PLUGINS_SYSTEM = Path("/Applications/Waves/Plug-Ins V16")
 WAVES_PLUGINS_USER = Path.home() / "Library/Preferences/Waves Preferences/Waves Plugins V16"
-WAVES_MONO_BACKUP_DIR = Path(__file__).resolve().parent / "waves_mono_backup"
+
+# Waves plugins not relevant for music production — surround, broadcast,
+# live sound, networking, test utilities.  Moved to tmp on each run.
+# See specifics/waves.txt for rationale.
+WAVES_NON_PRODUCTION: list[str] = [
+    # Surround / Immersive / 360 (post-production, film, Atmos)
+    "B360.bundle",
+    "C360.bundle",
+    "Dorrough Surround 5.0.bundle",
+    "Dorrough Surround 5.1.bundle",
+    "DTS Neural DownMix.bundle",
+    "DTS Neural Mono2Stereo.bundle",
+    "DTS Neural UpMix.bundle",
+    "IR-360.bundle",
+    "Immersive Wrapper.bundle",
+    "L360.bundle",
+    "MV360.bundle",
+    "R360.bundle",
+    "S360.bundle",
+    "Spherix Immersive Compressor.bundle",
+    "Spherix Immersive Limiter.bundle",
+    # Live sound / Installation
+    "Dugan Speech.bundle",
+    "TRACT.bundle",
+    "X-FDBK.bundle",
+    "Sub Align.bundle",
+    # Broadcast-specific
+    "WLM.bundle",
+    # Networking
+    "Waves Stream.bundle",
+    # Test utility
+    "SignalGenerator.bundle",
+]
 
 # Waves plugins that have BOTH mono (m) and stereo (s) variants inside the
 # WaveShell.  The mono versions are redundant when stereo exists.
-# The 'wavesmono' mode strips these from the ProcessXML files so the WaveShell
-# no longer registers them.  Use 'restoremono' to undo.
+# Stripped from ProcessXML files so the WaveShell no longer registers them.
 WAVES_MONO_REDUNDANT: list[str] = [
     "API-2500",
     "API-550A",
@@ -836,14 +868,11 @@ def _strip_mono_from_xml(xml_text: str) -> tuple[str, int]:
     return result, len(to_remove)
 
 
-def strip_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
+def strip_waves_mono() -> tuple[int, int]:
     """Strip mono sub-components from all Waves ProcessXML files.
 
-    Backs up originals before modifying.
     Returns (plugins_modified, subcomponents_removed).
     """
-    if backup_dir is None:
-        backup_dir = WAVES_MONO_BACKUP_DIR
     plugins_modified = 0
     total_removed = 0
 
@@ -866,27 +895,13 @@ def strip_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
                 if count == 0:
                     continue
 
-                # Back up original (preserve directory structure)
-                rel = xml_file.relative_to(waves_dir)
-                backup_path = backup_dir / waves_dir.name / rel
-                backup_path.parent.mkdir(parents=True, exist_ok=True)
-                if not backup_path.exists():
-                    backup_path.write_text(original, encoding='utf-8')
-
-                # Write modified XML
                 try:
                     xml_file.write_text(modified, encoding='utf-8')
                 except PermissionError:
-                    ok, err = run_with_sudo_retry(
-                        ["cp", "/dev/stdin", str(xml_file)],
-                        timeout=10,
-                    )
-                    if not ok:
-                        # Write to temp file and sudo mv
-                        tmp = Path(f"/tmp/_waves_mono_{os.getpid()}.xml")
-                        tmp.write_text(modified, encoding='utf-8')
-                        run_with_sudo_retry(["cp", str(tmp), str(xml_file)])
-                        tmp.unlink(missing_ok=True)
+                    tmp = Path(f"/tmp/_waves_mono_{os.getpid()}.xml")
+                    tmp.write_text(modified, encoding='utf-8')
+                    run_with_sudo_retry(["cp", str(tmp), str(xml_file)])
+                    tmp.unlink(missing_ok=True)
 
                 total_removed += count
                 bundle_modified = True
@@ -897,64 +912,35 @@ def strip_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
     return plugins_modified, total_removed
 
 
-def restore_waves_mono(backup_dir: Path | None = None) -> tuple[int, int]:
-    """Restore original Waves ProcessXML files from backups.
-
-    Returns (files_restored, errors).
-    """
-    if backup_dir is None:
-        backup_dir = WAVES_MONO_BACKUP_DIR
-    if not backup_dir.is_dir():
-        print("No backup directory found. Nothing to restore.")
-        return 0, 0
-
-    restored = 0
-    errors = 0
+def remove_waves_non_production(
+    dest_dir: Path,
+    failures: list[str] | None = None,
+) -> tuple[list[str], int]:
+    """Move non-production Waves plugin bundles to dest_dir."""
+    moved: list[str] = []
+    bytes_moved = 0
 
     for waves_dir in _find_waves_plugin_dirs():
-        backup_subdir = backup_dir / waves_dir.name
-        if not backup_subdir.is_dir():
-            continue
+        for bundle_name in WAVES_NON_PRODUCTION:
+            path = waves_dir / bundle_name
+            if not path.exists():
+                continue
+            if not ensure_dir(dest_dir):
+                continue
+            size = get_size(path)
+            ok, error = move_path(path, dest_dir)
+            if ok:
+                if bundle_name not in moved:
+                    moved.append(bundle_name)
+                bytes_moved += size
+            elif failures is not None:
+                failures.append(f"{path} -> {error}")
 
-        for backup_file in backup_subdir.rglob("*.xml"):
-            rel = backup_file.relative_to(backup_subdir)
-            target = waves_dir / rel
-            try:
-                content = backup_file.read_text(encoding='utf-8')
-                try:
-                    target.write_text(content, encoding='utf-8')
-                except PermissionError:
-                    tmp = Path(f"/tmp/_waves_restore_{os.getpid()}.xml")
-                    tmp.write_text(content, encoding='utf-8')
-                    ok, _ = run_with_sudo_retry(["cp", str(tmp), str(target)])
-                    tmp.unlink(missing_ok=True)
-                    if not ok:
-                        raise PermissionError(f"sudo cp failed for {target}")
-                restored += 1
-            except OSError as exc:
-                print(f"  Failed to restore {target}: {exc}")
-                errors += 1
-
-    # Clean up backup dir after successful restore
-    if errors == 0 and restored > 0:
-        shutil.rmtree(backup_dir, ignore_errors=True)
-
-    return restored, errors
+    return moved, bytes_moved
 
 
 def main():
     args = {arg.lower() for arg in sys.argv[1:]}
-
-    # Standalone restore mode — exits after restoring
-    if "restoremono" in args:
-        print("Restoring original Waves ProcessXML files from backups...")
-        restored, errors = restore_waves_mono()
-        if restored:
-            print(f"Restored {restored} file(s)." + (f" ({errors} error(s))" if errors else ""))
-            print("Re-scan plugins in your DAW to apply changes.")
-        elif errors:
-            print(f"Restoration failed with {errors} error(s).")
-        return
 
     remove_au = "skipau" not in args
     strip_waves = "skipwavesmono" not in args
@@ -1054,6 +1040,12 @@ def main():
     else:
         waves_au_moved, waves_au_bytes = [], 0
 
+    # Waves non-production plugins
+    waves_np_moved, waves_np_bytes = remove_waves_non_production(
+        tmp_base / "Waves_Non_Production",
+        failures,
+    )
+
     # Waves mono sub-component stripping (runs by default)
     waves_mono_removed = 0
     waves_mono_plugins = 0
@@ -1071,6 +1063,7 @@ def main():
     results["CLAP dupes (User)"] = (user_clap_moved, user_clap_bytes)
     results["Waves old versions"] = (waves_old_moved, waves_old_bytes)
     results["Waves AU format dupes"] = (waves_au_moved, waves_au_bytes)
+    results["Waves non-production"] = (waves_np_moved, waves_np_bytes)
 
     total_bytes = sum(b for _, b in results.values())
     total_count = sum(len(m) for m, _ in results.values())
@@ -1095,9 +1088,7 @@ def main():
 
         if waves_mono_removed:
             print(f"Waves mono stripped ({waves_mono_removed}):")
-            print(f"  Removed {waves_mono_removed} mono sub-component(s) from {waves_mono_plugins} plugin(s)")
-            print(f"  Backups in {WAVES_MONO_BACKUP_DIR}")
-            print(f"  Run with 'restoremono' to undo\n")
+            print(f"  Removed {waves_mono_removed} mono sub-component(s) from {waves_mono_plugins} plugin(s)\n")
 
         if failures:
             print(f"Failed to move {len(failures)} item(s):")
