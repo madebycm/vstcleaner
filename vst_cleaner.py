@@ -8,7 +8,7 @@ Removes (match by bundle base name, case-insensitive):
   - AU (.component) by default (skip with 'skipau' argument)
   - Old Waves WaveShell versions and AU format dupes
   - Non-production Waves plugins (surround, broadcast, live sound, etc.)
-  - Redundant Waves mono sub-components (when stereo exists)
+  - Redundant Waves mono and surround sub-components
 
 Keeps:
   - Any format that doesn't have a VST3 duplicate
@@ -811,8 +811,42 @@ def remove_duplicates_by_vst3(
 
 
 # ---------------------------------------------------------------------------
-# Waves mono sub-component stripping
+# Waves mono & surround sub-component stripping
 # ---------------------------------------------------------------------------
+
+# ProcessCodeDescription IDs to remove from template files.
+# Mono: prevents the WaveShell from auto-generating mono variants.
+# Surround: removes 5.0/5.1/7.x multichannel variants unused in stereo DAWs.
+_STRIP_PCDESC_IDS = {
+    # Mono
+    "default_mono",
+    "default_mono_to_stereo",
+    "default_mono_side_chain",
+    "default_mono_to_stereo_side_chain",
+    # Surround / Immersive
+    "default_5dot0",
+    "default_5dot1",
+    "default_5dot0_to_stereo",
+    "default_5dot0_to_5dot1",
+    "default_5dot1_to_stereo",
+    "default_mono_to_5dot0",
+    "default_mono_to_5dot1",
+    "default_stereo_to_5dot0",
+    "default_stereo_to_5dot1",
+    "default_stereo_to_7dot1",
+    "default_7dot0dot2",
+    "default_7dot0dot4",
+    "default_7dot1dot2",
+    "default_7dot1dot4",
+    "default_LRC_to_stereo",
+}
+
+# Ableton Live plugin database (shared across versions).
+ABLETON_PLUGIN_DB = (
+    Path.home()
+    / "Library/Application Support/Ableton/Live Database/Live-plugins-1.db"
+)
+
 
 def _find_waves_plugin_dirs() -> list[Path]:
     """Return existing Waves plugin bundle directories."""
@@ -823,8 +857,14 @@ def _find_waves_plugin_dirs() -> list[Path]:
     return dirs
 
 
-def _parse_subcomponents(xml_text: str) -> list[dict]:
-    """Parse SubComponent blocks from a ProcessXML file."""
+def _strip_mono_subcomponents(xml_text: str) -> tuple[str, int]:
+    """Remove mono SubComponent blocks when a stereo block exists for same name.
+
+    Handles both pure mono (default_mono) and mono-to-stereo
+    (default_mono_to_stereo) variants.
+
+    Returns (modified_xml, count_removed).
+    """
     results = []
     for m in re.finditer(r'<SubComponent>.*?</SubComponent>', xml_text, re.DOTALL):
         block = m.group()
@@ -832,29 +872,17 @@ def _parse_subcomponents(xml_text: str) -> list[dict]:
         name = name_m.group(1) if name_m else None
         if not name:
             continue
-        is_mono = ('default_mono' in block
-                   and 'default_mono_to_stereo' not in block
-                   and 'default_mono_side_chain' not in block)
+        is_mono = any(mid in block for mid in _STRIP_PCDESC_IDS)
         is_stereo = 'default_stereo' in block
         results.append({
             'name': name,
             'mono': is_mono,
             'stereo': is_stereo,
             'span': m.span(),
-            'text': block,
         })
-    return results
 
-
-def _strip_mono_from_xml(xml_text: str) -> tuple[str, int]:
-    """Remove mono SubComponent blocks when a stereo block exists for same name.
-
-    Returns (modified_xml, count_removed).
-    """
-    subs = _parse_subcomponents(xml_text)
-    stereo_names = {s['name'] for s in subs if s['stereo']}
-    # Find mono entries to remove (in reverse order to preserve offsets)
-    to_remove = [s for s in subs if s['mono'] and s['name'] in stereo_names]
+    stereo_names = {s['name'] for s in results if s['stereo']}
+    to_remove = [s for s in results if s['mono'] and s['name'] in stereo_names]
     if not to_remove:
         return xml_text, 0
 
@@ -862,7 +890,6 @@ def _strip_mono_from_xml(xml_text: str) -> tuple[str, int]:
     result = xml_text
     for entry in to_remove:
         start, end = entry['span']
-        # Also remove surrounding whitespace/newlines
         while start > 0 and result[start - 1] in ' \t':
             start -= 1
         if end < len(result) and result[end] == '\n':
@@ -872,10 +899,46 @@ def _strip_mono_from_xml(xml_text: str) -> tuple[str, int]:
     return result, len(to_remove)
 
 
+def _strip_mono_descriptions(xml_text: str) -> tuple[str, int]:
+    """Remove ProcessCodeDescription blocks that define mono configurations.
+
+    These templates in SubComponentDefault.xml (1000.xml) cause the WaveShell
+    to auto-generate mono variants for every plugin, even when no explicit
+    mono SubComponent is defined.
+
+    Returns (modified_xml, count_removed).
+    """
+    count = 0
+    result = xml_text
+    for mid in _STRIP_PCDESC_IDS:
+        pattern = re.compile(
+            rf'[ \t]*<ProcessCodeDescription\s+ID="{re.escape(mid)}">'
+            r'.*?</ProcessCodeDescription>\s*',
+            re.DOTALL,
+        )
+        result, n = pattern.subn('', result)
+        count += n
+    return result, count
+
+
+def _strip_redundant_from_xml(xml_text: str) -> tuple[str, int]:
+    """Remove mono and surround definitions from a ProcessXML file.
+
+    Strips both explicit SubComponent blocks (from 1001.xml etc.) and
+    ProcessCodeDescription templates (from 1000.xml / SubComponentDefault)
+    for mono and surround configurations.
+
+    Returns (modified_xml, total_count_removed).
+    """
+    result, sub_count = _strip_mono_subcomponents(xml_text)
+    result, desc_count = _strip_mono_descriptions(result)
+    return result, sub_count + desc_count
+
+
 def strip_waves_mono() -> tuple[int, int]:
     """Strip mono sub-components from all Waves ProcessXML files.
 
-    Returns (plugins_modified, subcomponents_removed).
+    Returns (plugins_modified, items_removed).
     """
     plugins_modified = 0
     total_removed = 0
@@ -895,7 +958,7 @@ def strip_waves_mono() -> tuple[int, int]:
                 except OSError:
                     continue
 
-                modified, count = _strip_mono_from_xml(original)
+                modified, count = _strip_redundant_from_xml(original)
                 if count == 0:
                     continue
 
@@ -913,11 +976,45 @@ def strip_waves_mono() -> tuple[int, int]:
             if bundle_modified:
                 plugins_modified += 1
 
-    # Clear the WaveShell scan cache so it rebuilds on next DAW launch
-    if total_removed > 0:
-        _clear_waves_scan_cache()
+    # Always clear the WaveShell scan cache so it rebuilds on next DAW launch
+    _clear_waves_scan_cache()
 
     return plugins_modified, total_removed
+
+
+def clear_ableton_waves_redundant() -> int:
+    """Remove Waves mono and surround plugin entries from Ableton's plugin database.
+
+    Returns the number of entries deleted.
+    """
+    if not ABLETON_PLUGIN_DB.exists():
+        return 0
+    try:
+        import sqlite3 as _sqlite3
+
+        conn = _sqlite3.connect(str(ABLETON_PLUGIN_DB))
+        cur = conn.cursor()
+        # Delete mono variants (name ends with "Mono" or contains "Mono/")
+        # and surround variants (5.0, 5.1, 7.x, Quad, AmbiX, FuMa, LRC).
+        cur.execute(
+            "DELETE FROM plugins WHERE vendor = 'Waves' AND ("
+            "  name LIKE '% Mono' OR name LIKE '% Mono/%'"
+            "  OR name LIKE '% 5.0%' OR name LIKE '% 5.1%'"
+            "  OR name LIKE '%/5.0%' OR name LIKE '%/5.1%'"
+            "  OR name LIKE '% 7.0%' OR name LIKE '% 7.1%'"
+            "  OR name LIKE '%/7.0%' OR name LIKE '%/7.1%'"
+            "  OR name LIKE '% Quad%' OR name LIKE '%/Quad%'"
+            "  OR name LIKE '% AmbiX%' OR name LIKE '% FuMa%'"
+            "  OR name LIKE '%Ambisonics%'"
+            ")"
+        )
+        deleted = cur.rowcount
+        if deleted:
+            conn.commit()
+        conn.close()
+        return deleted
+    except Exception:
+        return 0
 
 
 def _clear_waves_scan_cache() -> None:
@@ -1072,8 +1169,10 @@ def main():
     # Waves mono sub-component stripping (runs by default)
     waves_mono_removed = 0
     waves_mono_plugins = 0
+    ableton_deleted = 0
     if strip_waves:
         waves_mono_plugins, waves_mono_removed = strip_waves_mono()
+        ableton_deleted = clear_ableton_waves_redundant()
 
     # Combine results
     results["VST2 dupes (System)"] = (sys_vst_moved, sys_vst_bytes)
@@ -1091,7 +1190,7 @@ def main():
     total_bytes = sum(b for _, b in results.values())
     total_count = sum(len(m) for m, _ in results.values())
 
-    if total_count == 0 and waves_mono_removed == 0:
+    if total_count == 0 and waves_mono_removed == 0 and ableton_deleted == 0:
         if failures:
             print(f"Found duplicates but failed to move {len(failures)} item(s).")
             for entry in failures:
@@ -1111,7 +1210,11 @@ def main():
 
         if waves_mono_removed:
             print(f"Waves mono stripped ({waves_mono_removed}):")
-            print(f"  Removed {waves_mono_removed} mono sub-component(s) from {waves_mono_plugins} plugin(s)\n")
+            print(f"  Removed {waves_mono_removed} mono definition(s) from {waves_mono_plugins} plugin(s)\n")
+
+        if ableton_deleted:
+            print(f"Ableton plugin database:")
+            print(f"  Removed {ableton_deleted} Waves mono/surround entries from Live database\n")
 
         if failures:
             print(f"Failed to move {len(failures)} item(s):")
