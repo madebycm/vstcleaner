@@ -37,14 +37,18 @@ Surround / Immersive / 360 (post-production, film, Atmos):
   - IR-360            Surround convolution reverb
   - Immersive Wrapper  Dolby Atmos channel wrapper
   - L360              Surround limiter
+  - LFE360            LFE (subwoofer) channel management, surround only
   - MV360             Surround multiband dynamics
   - R360              Surround reverb
   - S360              Surround panner/imager
   - Spherix Imm. Comp  Atmos compressor
   - Spherix Imm. Lim   Atmos limiter
+  - UM                UM225/UM226 surround upmixers (2->5.0, 2->5.1)
 
 Live Sound / Installation:
   - Dugan Speech       Auto mic mixing for conferences/broadcast
+  - EMO-IEM            In-ear monitor plugin for live sound
+  - Feedback Hunter    Live sound feedback frequency detection
   - TRACT              PA system tuning/alignment
   - X-FDBK             Live feedback suppression
   - Sub Align           Subwoofer time alignment for live rigs
