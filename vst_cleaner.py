@@ -34,6 +34,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+from specifics.fabfilter import find_obsolete as find_obsolete_fabfilter
 
 CACHE_FILE = Path(__file__).resolve().parent / ".cache"
 CACHE_VERSION = 1
@@ -1170,6 +1171,27 @@ def main():
         failures,
     )
 
+    # FabFilter: remove older plugin versions (e.g. Pro-Q 2 when Pro-Q 3 exists)
+    all_plugin_dirs = [
+        SYSTEM_VST3_PATH, SYSTEM_VST_PATH, SYSTEM_COMPONENTS_PATH,
+        SYSTEM_AAX_PATH, SYSTEM_CLAP_PATH,
+        USER_VST3_PATH, USER_VST_PATH, USER_COMPONENTS_PATH,
+        USER_AAX_PATH, USER_CLAP_PATH,
+    ]
+    ff_moved: list[str] = []
+    ff_bytes = 0
+    ff_dest = tmp_base / "FabFilter_Old_Versions"
+    for path in find_obsolete_fabfilter(all_plugin_dirs):
+        if not ensure_dir(ff_dest):
+            continue
+        size = get_size(path)
+        ok, error = move_path(path, ff_dest)
+        if ok:
+            ff_moved.append(path.name)
+            ff_bytes += size
+        else:
+            failures.append(f"{path} -> {error}")
+
     # Waves mono sub-component stripping (runs by default)
     waves_mono_removed = 0
     waves_mono_plugins = 0
@@ -1190,6 +1212,7 @@ def main():
     results["Waves old versions"] = (waves_old_moved, waves_old_bytes)
     results["Waves AU format dupes"] = (waves_au_moved, waves_au_bytes)
     results["Waves non-production"] = (waves_np_moved, waves_np_bytes)
+    results["FabFilter old versions"] = (ff_moved, ff_bytes)
 
     total_bytes = sum(b for _, b in results.values())
     total_count = sum(len(m) for m, _ in results.values())
