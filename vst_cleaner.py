@@ -1273,8 +1273,30 @@ def main():
     print_recent_vsts()
 
 
+def _get_bundle_install_time(bundle: Path) -> float:
+    """Get the real install time by checking the binary inside Contents/MacOS/.
+
+    Installers often preserve the original bundle directory timestamp, but the
+    binary itself gets a fresh birthtime when written to disk.
+    """
+    macos_dir = bundle / "Contents" / "MacOS"
+    if macos_dir.is_dir():
+        try:
+            newest = max(
+                (f.stat() for f in macos_dir.iterdir() if f.is_file()),
+                key=lambda s: getattr(s, "st_birthtime", s.st_mtime),
+                default=None,
+            )
+            if newest:
+                return getattr(newest, "st_birthtime", newest.st_mtime)
+        except OSError:
+            pass
+    st = bundle.stat()
+    return getattr(st, "st_birthtime", st.st_mtime)
+
+
 def print_recent_vsts(count: int = 50) -> None:
-    """Print the most recently installed VST3 plugins sorted by modification time."""
+    """Print the most recently installed VST3 plugins sorted by install time."""
     vst3_dirs = [SYSTEM_VST3_PATH, USER_VST3_PATH]
     plugins: list[tuple[str, float]] = []
 
@@ -1284,8 +1306,7 @@ def print_recent_vsts(count: int = 50) -> None:
         for bundle in d.iterdir():
             if bundle.suffix.lower() == ".vst3":
                 try:
-                    st = bundle.stat()
-                    ctime = getattr(st, "st_birthtime", st.st_mtime)
+                    ctime = _get_bundle_install_time(bundle)
                     plugins.append((bundle.stem, ctime))
                 except OSError:
                     continue
