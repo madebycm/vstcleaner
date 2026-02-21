@@ -1284,8 +1284,9 @@ def print_recent_vsts(count: int = 50) -> None:
         for bundle in d.iterdir():
             if bundle.suffix.lower() == ".vst3":
                 try:
-                    mtime = bundle.stat().st_mtime
-                    plugins.append((bundle.stem, mtime))
+                    st = bundle.stat()
+                    ctime = getattr(st, "st_birthtime", st.st_mtime)
+                    plugins.append((bundle.stem, ctime))
                 except OSError:
                     continue
 
