@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from specifics.fabfilter import find_obsolete as find_obsolete_fabfilter
 
@@ -367,9 +368,9 @@ WAVES_PLUGINS_USER = Path.home() / "Library/Preferences/Waves Preferences/Waves 
 # WaveShell rebuilds its sub-plugin list on next DAW launch.
 WAVES_SCAN_CACHE_DIR = Path.home() / "Library/Caches/Waves"
 
-# Waves plugins not relevant for music production — surround, broadcast,
-# live sound, networking, test utilities.  Moved to tmp on each run.
-# See specifics/waves.txt for rationale.
+# Waves plugins not relevant for FX-only workflow — surround, broadcast,
+# live sound, networking, test utilities, and all virtual instruments.
+# Moved to tmp on each run.  See specifics/waves.txt for rationale.
 WAVES_NON_PRODUCTION: list[str] = [
     # Surround / Immersive / 360 (post-production, film, Atmos)
     "B360.bundle",
@@ -402,6 +403,20 @@ WAVES_NON_PRODUCTION: list[str] = [
     "Waves Stream.bundle",
     # Test utility
     "SignalGenerator.bundle",
+    # Virtual instruments (synths, samplers, pianos)
+    "Bass Fingers.bundle",
+    "Bass Slapper.bundle",
+    "Clavinet.bundle",
+    "CODEX.bundle",
+    "CR8 Sampler.bundle",
+    "Electric Grand 80.bundle",
+    "Electric200.bundle",
+    "Electric88.bundle",
+    "Element2.bundle",
+    "Flow Motion.bundle",
+    "GrandRhapsody.bundle",
+    "OVox.bundle",
+    "StudioVerse Instruments.bundle",
 ]
 
 # Waves plugins that have BOTH mono (m) and stereo (s) variants inside the
@@ -1254,6 +1269,43 @@ def main():
     if not strip_waves:
         print("Skipping Waves mono stripping ('skipwavesmono' was specified).")
 
+    # Show 50 most recently installed VST3 plugins
+    print_recent_vsts()
+
+
+def print_recent_vsts(count: int = 50) -> None:
+    """Print the most recently installed VST3 plugins sorted by modification time."""
+    vst3_dirs = [SYSTEM_VST3_PATH, USER_VST3_PATH]
+    plugins: list[tuple[str, float]] = []
+
+    for d in vst3_dirs:
+        if not d.is_dir():
+            continue
+        for bundle in d.iterdir():
+            if bundle.suffix.lower() == ".vst3":
+                try:
+                    mtime = bundle.stat().st_mtime
+                    plugins.append((bundle.stem, mtime))
+                except OSError:
+                    continue
+
+    if not plugins:
+        return
+
+    # Dedupe by name (keep most recent)
+    seen: dict[str, float] = {}
+    for name, mtime in plugins:
+        if name not in seen or mtime > seen[name]:
+            seen[name] = mtime
+    sorted_plugins = sorted(seen.items(), key=lambda x: x[1], reverse=True)[:count]
+
+    print(f"\n{'─' * 50}")
+    print(f"Top {min(count, len(sorted_plugins))} recently installed VST3s:")
+    print(f"{'─' * 50}")
+    for i, (name, mtime) in enumerate(sorted_plugins, 1):
+        date_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        print(f"  {i:2d}. {name:<40s} {date_str}")
+    print()
 
 
 if __name__ == "__main__":
