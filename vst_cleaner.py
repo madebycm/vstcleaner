@@ -14,6 +14,7 @@ Keeps:
   - Any format that doesn't have a VST3 duplicate
   - VST3 bundles (always preferred)
   - AU plugins (only when 'skipau' is specified)
+  - VSX plugin (exact name "VSX", never removed)
 
 Options:
   skipau         — Keep AU/Components (don't remove them)
@@ -818,6 +819,8 @@ def remove_duplicates_by_vst3(
 
     for item in list_bundles(folder, suffix):
         if plugin_base_name(item) not in vst3_names:
+            continue
+        if item.stem == "VSX":
             continue
         size = get_size(item)
         ok, error = move_path(item, dest_dir)
